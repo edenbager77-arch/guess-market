@@ -1,0 +1,10 @@
+<component name="libraryTable">
+  <library name="GuessMarket-Ex1">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/ui.jar!/" />
+      <root url="jar://$PROJECT_DIR$/engine.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

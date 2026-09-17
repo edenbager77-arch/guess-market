@@ -1,11 +1,6 @@
 package guessmarket.engine.service;
 
-import guessmarket.engine.model.CommissionType;
-import guessmarket.engine.model.GMEvent;
-import guessmarket.engine.model.GMOption;
-import guessmarket.engine.model.Trade;
-import guessmarket.engine.xml.EventFileValidationResult;
-import guessmarket.engine.xml.GMEventFileLoader;
+import guessmarket.engine.model.*;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -14,142 +9,226 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The "passive" engine module: it only reacts to calls, never prints
- * anything and never knows who is calling it (per the assignment's
- * module-separation requirement). All console I/O lives in the ui module.
+ * Passive engine for Ex2. No I/O, no JavaFX awareness.
+ *
+ * Commission routing note (changed from Ex1): in Ex2 the MM "receives the
+ * commissions from the event" (spec, MM responsibilities), so commissions are
+ * credited to the MM's user account rather than being parked in the event account.
  */
 public class GuessMarketEngine {
 
-    private final GMEventFileLoader loader = new GMEventFileLoader();
-    private Map<Integer, GMEvent> events = new LinkedHashMap<>();
+    private Map<String, User> users = new LinkedHashMap<>();
+    private Map<String, GMEvent> events = new LinkedHashMap<>();
     private boolean fileLoaded = false;
 
-    public EventFileValidationResult loadFile(String path) {
-        EventFileValidationResult result = loader.load(path);
-        if (result.isValid()) {
-            Map<Integer, GMEvent> newEvents = new LinkedHashMap<>();
-            for (GMEvent e : result.getEvents()) {
-                // Initial LMSR subsidy: C(0,0) = b * ln(2). This funds the market
-                // before any trading happens (see appendix A of the spec).
-                double subsidy = LmsrCalculator.cost(e.getB(), 0, 0);
-                e.setAccount(subsidy);
-                newEvents.put(e.getId(), e);
-            }
-            this.events = newEvents; // a valid load fully replaces the previous state
-            this.fileLoaded = true;
-        }
-        return result;
+    public void replaceContents(List<User> newUsers, List<GMEvent> newEvents) {
+        Map<String, User> u = new LinkedHashMap<>();
+        for (User x : newUsers) u.put(x.getName(), x);
+        Map<String, GMEvent> e = new LinkedHashMap<>();
+        for (GMEvent x : newEvents) e.put(x.getName(), x);
+        this.users = u;
+        this.events = e;
+        this.fileLoaded = true;
     }
 
-    public boolean isFileLoaded() {
-        return fileLoaded;
+    public boolean isFileLoaded() { return fileLoaded; }
+
+    public List<User> getAllUsers() { return new ArrayList<>(users.values()); }
+    public User getUser(String name) {
+        User u = users.get(name);
+        if (u == null) throw new GuessMarketException("Unknown user: " + name);
+        return u;
     }
+    public Map<String, User> getUserMap() { return users; }
 
     public List<GMEvent> getAllEvents() {
-        List<GMEvent> list = new ArrayList<>(events.values());
-        list.sort(Comparator.comparingInt(GMEvent::getId));
-        return list;
+        List<GMEvent> l = new ArrayList<>(events.values());
+        l.sort(Comparator.comparingInt(GMEvent::getId));
+        return l;
     }
-
-    public List<GMEvent> getActiveEvents() {
-        List<GMEvent> list = new ArrayList<>();
-        for (GMEvent e : getAllEvents()) {
-            if (!e.isClosed()) list.add(e);
-        }
-        return list;
-    }
-
-    public GMEvent getEventById(int id) {
-        GMEvent e = events.get(id);
-        if (e == null) throw new GuessMarketException("Event not found.");
+    public GMEvent getEvent(String name) {
+        GMEvent e = events.get(name);
+        if (e == null) throw new GuessMarketException("Unknown event: " + name);
         return e;
     }
 
-    /** Current LMSR price (0..1) of the given option within its event. */
-    public double getPrice(int eventId, String optionName) {
-        GMEvent event = getEventById(eventId);
-        GMOption chosen = event.getOption(optionName);
-        if (chosen == null) throw new GuessMarketException("Unknown option: " + optionName);
-        GMOption other = otherOption(event, chosen);
-        double q = event.getQuantity(chosen.getName());
-        double qOther = event.getQuantity(other.getName());
-        return LmsrCalculator.price(event.getB(), q, qOther);
+    private void requireActive(User u) {
+        if (u.isBlocked())
+            throw new GuessMarketException("User " + u.getName()
+                    + " is blocked (negative balance) and cannot act.");
     }
 
-    public PurchaseResult purchase(int eventId, int optionIndex, double quantity) {
-        GMEvent event = getEventById(eventId);
-        if (event.isClosed()) {
-            throw new GuessMarketException("This event is closed and can no longer be traded.");
-        }
-        if (optionIndex < 1 || optionIndex > event.getOptions().size()) {
-            throw new GuessMarketException("Invalid option selection.");
-        }
-        if (quantity <= 0) {
-            throw new GuessMarketException("Quantity must be a positive number.");
-        }
+    // ---------------- event lifecycle ----------------
 
-        GMOption chosen = event.getOptions().get(optionIndex - 1);
-        GMOption other = otherOption(event, chosen);
+    public void openEvent(String eventName, String actingUser) {
+        GMEvent e = getEvent(eventName);
+        User u = getUser(actingUser);
+        requireActive(u);
+        if (!u.getName().equals(e.getMarketMakerName()))
+            throw new GuessMarketException("Only the market maker can open this event.");
+        if (e.getStatus() != EventStatus.NOT_STARTED)
+            throw new GuessMarketException("Event is not in a state that can be opened.");
 
-        double qChosenBefore = event.getQuantity(chosen.getName());
-        double qOtherValue = event.getQuantity(other.getName());
-        double costBefore = LmsrCalculator.cost(event.getB(), qChosenBefore, qOtherValue);
-        double qChosenAfter = qChosenBefore + quantity;
-        double costAfter = LmsrCalculator.cost(event.getB(), qChosenAfter, qOtherValue);
-        double sharesCost = costAfter - costBefore;
+        double cost = e.openingCost();
+        if (!u.canAfford(cost))
+            throw new GuessMarketException(String.format(
+                    "Market maker cannot afford the opening cost of %.2f (balance %.2f).",
+                    cost, u.getBalance()));
 
-        double commission = 0.0;
-        if (event.getCommissionType() == CommissionType.ON_PURCHASE) {
-            commission = sharesCost * event.getCommissionPercent() / 100.0;
+        u.applyChange(-cost, "Opened event " + e.getName());
+        u.addNetForEvent(e.getName(), -cost);
+        e.addToAccount(cost);
+        e.setStatus(EventStatus.ACTIVE);
+
+        if (e instanceof OrderBookEvent) {
+            OrderBookEvent ob = (OrderBookEvent) e;
+            double pairs = ob.initialPairs();
+            for (GMOption o : ob.getOptions()) u.addShares(ob.getName(), o.getName(), pairs);
         }
-        double totalPaid = sharesCost + commission;
-
-        event.setQuantity(chosen.getName(), qChosenAfter);
-        chosen.addShares(quantity);
-        event.addToAccount(sharesCost);
-        if (commission > 0) {
-            event.addToAccount(commission);
-            event.addCommission(commission);
-        }
-        event.addTrade(new Trade(chosen.getName(), quantity, sharesCost));
-
-        return new PurchaseResult(chosen.getName(), quantity, sharesCost, commission, totalPaid);
     }
 
-    public void closeEvent(int eventId, int winningOptionIndex) {
-        GMEvent event = getEventById(eventId);
-        if (event.isClosed()) {
-            throw new GuessMarketException("This event is already closed.");
-        }
-        if (winningOptionIndex < 1 || winningOptionIndex > event.getOptions().size()) {
-            throw new GuessMarketException("Invalid option selection.");
-        }
+    public void closeEvent(String eventName, String actingUser, String winningOption) {
+        GMEvent e = getEvent(eventName);
+        User mm = getUser(actingUser);
+        if (!mm.getName().equals(e.getMarketMakerName()))
+            throw new GuessMarketException("Only the market maker can close this event.");
+        if (e.getStatus() != EventStatus.ACTIVE)
+            throw new GuessMarketException("Only an active event can be closed.");
+        if (e.getOption(winningOption) == null)
+            throw new GuessMarketException("Unknown option: " + winningOption);
 
-        String winningName = event.getOptions().get(winningOptionIndex - 1).getName();
+        e.setWinningOption(winningOption);
+        double payoutPerShare = (e instanceof OrderBookEvent)
+                ? ((OrderBookEvent) e).getD() : 1.0;
 
-        double totalInvestedInWinner = 0.0;
-        for (Trade t : event.getHistory()) {
-            if (t.getOptionName().equalsIgnoreCase(winningName)) {
-                totalInvestedInWinner += t.getPricePaid();
+        for (User u : users.values()) {
+            double shares = u.getShares(e.getName(), winningOption);
+            if (shares <= 0) continue;
+            double payout = shares * payoutPerShare;
+
+            double fee = 0.0;
+            if (e.getCommissionType() == CommissionType.ON_CLOSE && e.getCommissionPercent() > 0) {
+                fee = payout * e.getCommissionPercent() / 100.0;
+            }
+            u.applyChange(payout - fee, "Winnings for " + e.getName()
+                    + (fee > 0 ? " (after commission)" : ""));
+            u.addNetForEvent(e.getName(), payout - fee);
+            if (fee > 0) u.addCommissionPaid(e.getName(), fee);
+            e.addToAccount(-payout);
+            if (fee > 0) {
+                mm.applyChange(+fee, "Closing commission (" + e.getName() + ")");
+                e.addCommission(fee);
             }
         }
 
-        if (event.getCommissionType() == CommissionType.ON_CLOSE) {
-            double commission = totalInvestedInWinner * event.getCommissionPercent() / 100.0;
-            event.addCommission(commission);
-            // The remainder (totalInvestedInWinner - commission) is what would be
-            // distributed pro-rata to winning-share holders. Ex1 has a single user
-            // and its console UI never needs to display per-user payouts, so we do
-            // not track it further here (kept minimal on purpose, per module scope).
+        // Anything left in the event account goes back to the MM.
+        double leftover = e.getAccount();
+        if (Math.abs(leftover) > 1e-9) {
+            mm.applyChange(+leftover, "Residual event funds returned (" + e.getName() + ")");
+            mm.addNetForEvent(e.getName(), +leftover);
+            e.setAccount(0);
         }
-
-        event.close(winningName);
+        e.setStatus(EventStatus.CLOSED);
     }
 
-    private GMOption otherOption(GMEvent event, GMOption opt) {
-        for (GMOption o : event.getOptions()) {
-            if (o != opt) return o;
+    // ---------------- LMSR trading ----------------
+
+    public double lmsrCost(String eventName, String optionName, double quantity) {
+        LmsrEvent e = asLmsr(eventName);
+        String other = otherOptionName(e, optionName);
+        double qThis = e.getQuantity(optionName), qOther = e.getQuantity(other);
+        return LmsrCalculator.cost(e.getB(), qThis + quantity, qOther)
+                - LmsrCalculator.cost(e.getB(), qThis, qOther);
+    }
+
+    public void lmsrBuy(String eventName, String userName, String optionName, double quantity) {
+        LmsrEvent e = asLmsr(eventName);
+        User u = getUser(userName);
+        requireActive(u);
+        if (e.getStatus() != EventStatus.ACTIVE)
+            throw new GuessMarketException("This event is not open for trading.");
+        if (quantity <= 0) throw new GuessMarketException("Quantity must be positive.");
+        if (e.getOption(optionName) == null)
+            throw new GuessMarketException("Unknown option: " + optionName);
+
+        double cost = lmsrCost(eventName, optionName, quantity);
+        double fee = 0.0;
+        if (e.getCommissionType() == CommissionType.ON_PURCHASE && e.getCommissionPercent() > 0)
+            fee = cost * e.getCommissionPercent() / 100.0;
+
+        u.applyChange(-(cost + fee), "Bought " + String.format("%.2f", quantity) + " "
+                + optionName + " (" + e.getName() + ")");
+        u.addShares(e.getName(), optionName, quantity);
+        u.addPaidForOption(e.getName(), optionName, cost);
+        u.addCommissionPaid(e.getName(), fee);
+        u.addNetForEvent(e.getName(), -(cost + fee));
+
+        e.setQuantity(optionName, e.getQuantity(optionName) + quantity);
+        e.getOption(optionName).addShares(quantity);
+        e.addToAccount(cost);
+
+        if (fee > 0) {
+            User mm = users.get(e.getMarketMakerName());
+            if (mm != null) mm.applyChange(+fee, "Commission received (" + e.getName() + ")");
+            e.addCommission(fee);
         }
-        return opt;
+        e.addTrade(new Trade(userName, optionName, quantity, cost, fee));
+    }
+
+    // ---------------- Order Book trading ----------------
+
+    public void placeOrder(String eventName, String userName, OrderSide side,
+                           String optionName, double price, double quantity) {
+        OrderBookEvent e = asOrderBook(eventName);
+        User u = getUser(userName);
+        requireActive(u);
+        if (e.getStatus() != EventStatus.ACTIVE)
+            throw new GuessMarketException("This event is not open for trading.");
+        if (quantity <= 0) throw new GuessMarketException("Quantity must be positive.");
+        if (e.getOption(optionName) == null)
+            throw new GuessMarketException("Unknown option: " + optionName);
+
+        double maxPrice = e.getD() - 0.01;
+        if (price <= 0) throw new GuessMarketException("Price must be positive.");
+        if (price > maxPrice + 1e-9)
+            throw new GuessMarketException(String.format(
+                    "Price cannot exceed %.2f (base value %d minus 0.01).", maxPrice, e.getD()));
+
+        if (side == OrderSide.SELL) {
+            double held = u.getShares(e.getName(), optionName);
+            // Shares already promised to other resting sell orders are not available
+            // again - without this a user could oversell the same shares twice.
+            double committed = 0;
+            for (Order o : e.getBook(optionName).getAsks())
+                if (o.getUserName().equals(userName)) committed += o.getRemainingQuantity();
+            double available = held - committed;
+            if (available < quantity - 1e-9)
+                throw new GuessMarketException(String.format(
+                        "Not enough shares to sell: holding %.2f, already offered %.2f, "
+                        + "available %.2f, tried to sell %.2f.", held, committed, available, quantity));
+        }
+
+        u.ensureParticipation(e.getName());
+        new OrderBookMatcher(e, users).submit(new Order(userName, side, optionName, price, quantity));
+    }
+
+    // ---------------- helpers ----------------
+
+    private LmsrEvent asLmsr(String name) {
+        GMEvent e = getEvent(name);
+        if (!(e instanceof LmsrEvent)) throw new GuessMarketException("Not an LMSR event: " + name);
+        return (LmsrEvent) e;
+    }
+
+    private OrderBookEvent asOrderBook(String name) {
+        GMEvent e = getEvent(name);
+        if (!(e instanceof OrderBookEvent)) throw new GuessMarketException("Not an order-book event: " + name);
+        return (OrderBookEvent) e;
+    }
+
+    private String otherOptionName(GMEvent e, String optionName) {
+        for (GMOption o : e.getOptions())
+            if (!o.getName().equalsIgnoreCase(optionName)) return o.getName();
+        return optionName;
     }
 }

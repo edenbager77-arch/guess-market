@@ -1,29 +1,26 @@
 package guessmarket.engine.service;
 
 /**
- * Logarithmic Market Scoring Rule math, for the binary (2-option) case used
- * throughout Ex1. See course appendix A for the derivation.
+ * LMSR math for the binary case.
+ *   C(q1,q2) = b * ln( e^(q1/b) + e^(q2/b) )
+ *   price_i  = e^(qi/b) / sum
  *
- *   Cost function:  C(q1, q2) = b * ln( e^(q1/b) + e^(q2/b) )
- *   Price of option 1:  price1 = e^(q1/b) / ( e^(q1/b) + e^(q2/b) )
- *
- * The cost of a trade is C(after) - C(before). The initial subsidy required
- * to open an event is C(0, 0) = b * ln(2).
+ * Both are computed with the log-sum-exp shift so that large quantities
+ * (where e^(q/b) would overflow to Infinity) still give exact results.
  */
 public final class LmsrCalculator {
-
-    private LmsrCalculator() {
-    }
+    private LmsrCalculator() {}
 
     public static double cost(int b, double q1, double q2) {
-        double e1 = Math.exp(q1 / b);
-        double e2 = Math.exp(q2 / b);
-        return b * Math.log(e1 + e2);
+        double x1 = q1 / b, x2 = q2 / b;
+        double m = Math.max(x1, x2);
+        return b * (m + Math.log(Math.exp(x1 - m) + Math.exp(x2 - m)));
     }
 
     public static double price(int b, double qThis, double qOther) {
-        double eThis = Math.exp(qThis / b);
-        double eOther = Math.exp(qOther / b);
-        return eThis / (eThis + eOther);
+        double x1 = qThis / b, x2 = qOther / b;
+        double m = Math.max(x1, x2);
+        double e1 = Math.exp(x1 - m), e2 = Math.exp(x2 - m);
+        return e1 / (e1 + e2);
     }
 }

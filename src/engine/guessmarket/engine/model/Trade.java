@@ -1,30 +1,17 @@
 package guessmarket.engine.model;
 
-/**
- * A single executed purchase in an event's history.
- * pricePaid is the LMSR cost of the shares themselves (NOT including commission).
- */
+/** One executed LMSR purchase. pricePaid excludes commission. */
 public class Trade {
+    private final String userName, optionName;
+    private final double quantity, pricePaid, commissionPaid;
 
-    private final String optionName;
-    private final double quantity;
-    private final double pricePaid;
-
-    public Trade(String optionName, double quantity, double pricePaid) {
-        this.optionName = optionName;
-        this.quantity = quantity;
-        this.pricePaid = pricePaid;
+    public Trade(String userName, String optionName, double quantity, double pricePaid, double commissionPaid) {
+        this.userName = userName; this.optionName = optionName;
+        this.quantity = quantity; this.pricePaid = pricePaid; this.commissionPaid = commissionPaid;
     }
-
-    public String getOptionName() {
-        return optionName;
-    }
-
-    public double getQuantity() {
-        return quantity;
-    }
-
-    public double getPricePaid() {
-        return pricePaid;
-    }
+    public String getUserName() { return userName; }
+    public String getOptionName() { return optionName; }
+    public double getQuantity() { return quantity; }
+    public double getPricePaid() { return pricePaid; }
+    public double getCommissionPaid() { return commissionPaid; }
 }
